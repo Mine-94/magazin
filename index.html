@@ -1,23 +1,173 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Three.js Box Viewer</title>
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        overflow: hidden;
-        height: 100%;
-        background-color: #000;
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Readymag용 3D 모델</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"
       }
-      canvas {
-        display: block;
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { AnimationUtils } from 'three';
+
+    const canvas = document.getElementById('canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.5, 6);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 2);
+    directionalLight.position.set(5, 10, 7);
+    scene.add(ambientLight, directionalLight);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.rotateSpeed = 1.0;
+    controls.zoomSpeed = 0.8;
+    controls.enableZoom = false;
+    controls.enableRotate = false;
+    controls.enablePan = false;
+
+    const fixedTarget = new THREE.Vector3(0, 0, 0);
+    controls.target.copy(fixedTarget);
+    controls.update();
+
+    let mixer;
+    let actions = [];
+    const totalPages = 33;
+    const frameRate = 24;
+    const framesPerClip = 100;
+    const animationDurationOverride = 1.0;
+    let isAnimating = false;
+    let currentActionIndex = -1;
+    let wasLastClickRight = true;
+
+    const loader = new GLTFLoader();
+    loader.load('magazin.glb', (gltf) => {
+      const model = gltf.scene;
+      model.scale.set(1, 1, 1);
+      model.rotation.x = Math.PI / 2.36;
+      scene.add(model);
+
+      mixer = new THREE.AnimationMixer(model);
+      const animation = gltf.animations[0];
+      if (!animation) {
+        console.error('No animations found in GLTF');
+        return;
       }
-    </style>
-  </head>
-  <body>
-    <canvas id="canvas"></canvas>
-    <script type="module" src="/src/main.ts"></script>
-  </body>
+
+      for (let i = 0; i < totalPages * 2; i++) {
+        const startFrame = i * framesPerClip;
+        const endFrame = (i + 1) * framesPerClip;
+        const name = `page${Math.floor(i / 2)}_${i % 2 === 0 ? 'forward' : 'backward'}`;
+        const clip = AnimationUtils.subclip(animation, name, startFrame, endFrame, frameRate);
+        const action = mixer.clipAction(clip);
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+        actions.push(action);
+      }
+
+      animate();
+    });
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      if (!mixer || actions.length === 0 || isAnimating) return;
+
+      const rect = canvas.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(pointer, camera);
+      const intersects = raycaster.intersectObjects(scene.children, true);
+
+      if (intersects.length > 0) {
+        const clickedLeft = event.clientX < window.innerWidth / 2;
+        let nextIndex;
+
+        if (currentActionIndex === 0 && clickedLeft) {
+          nextIndex = 1;
+        } else {
+          if (!clickedLeft) {
+            if (currentActionIndex === -1) {
+              nextIndex = 0;
+            } else if (currentActionIndex % 2 === 1) {
+              nextIndex = currentActionIndex - 1;
+            } else {
+              nextIndex = currentActionIndex + 2;
+            }
+            wasLastClickRight = true;
+          } else {
+            if (currentActionIndex <= 0) return;
+            if (wasLastClickRight) {
+              nextIndex = currentActionIndex + 1;
+            } else {
+              nextIndex = currentActionIndex - 2;
+            }
+            wasLastClickRight = false;
+          }
+        }
+
+        if (nextIndex < 0 || nextIndex >= actions.length) return;
+
+        actions.forEach(action => {
+          action.stop();
+          action.reset();
+        });
+
+        const action = actions[nextIndex];
+        action.play();
+        action.paused = false;
+        action.timeScale = 2.0;
+        mixer.setTime(0);
+        isAnimating = true;
+        currentActionIndex = nextIndex;
+
+        setTimeout(() => {
+          action.paused = true;
+          isAnimating = false;
+        }, animationDurationOverride * 1000);
+      }
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      if (mixer) mixer.update(1 / frameRate);
+      renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
 </html>
